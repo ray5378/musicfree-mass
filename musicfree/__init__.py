@@ -1,4 +1,5 @@
-"""MusicFree music provider for Music Assistant.
+"""
+MusicFree music provider for Music Assistant.
 
 Connects to a MusicFree (music-free-site) server via the OpenSubsonic API,
 allowing MA to browse and stream music from the MusicFree server as a music source.
@@ -8,13 +9,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ProviderFeature
 
 from .sonic_provider import OpenSonicProvider
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
+    from music_assistant_models.config_entries import ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
@@ -48,85 +48,3 @@ async def setup(
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
     return OpenSonicProvider(mass, manifest, config, SUPPORTED_FEATURES)
-
-
-async def get_config_entries(
-    mass: MusicAssistant,
-    instance_id: str | None = None,
-    action: str | None = None,
-    values: dict[str, ConfigValueType] | None = None,
-) -> tuple[ConfigEntry, ...]:
-    """
-    Return Config entries to setup this provider.
-
-    instance_id: id of an existing provider instance (None if new instance setup).
-    action: [optional] action key called from config entries UI.
-    values: the (intermediate) raw values for config entries sent with the action.
-    """
-    # ruff: noqa: ARG001
-    from .sonic_provider import (
-        CONF_BASE_URL,
-        CONF_ENABLE_LEGACY_AUTH,
-        CONF_ENABLE_PODCASTS,
-        CONF_NEW_ALBUMS,
-        CONF_PAGE_SIZE,
-        CONF_PLAYED_ALBUMS,
-        CONF_RAW_FILE,
-        CONF_RECO_FAVES,
-        CONF_RECO_SIZE,
-    )
-    from music_assistant_models.enums import ConfigEntryType
-
-    from music_assistant.constants import CONF_PASSWORD, CONF_PATH, CONF_PORT, CONF_USERNAME
-
-    return (
-        ConfigEntry(
-            key=CONF_ENABLE_PODCASTS,
-            type=ConfigEntryType.BOOLEAN,
-            required=True,
-            default_value=True,
-        ),
-        ConfigEntry(
-            key=CONF_ENABLE_LEGACY_AUTH,
-            type=ConfigEntryType.BOOLEAN,
-            required=True,
-            default_value=False,
-        ),
-        ConfigEntry(
-            key=CONF_RECO_FAVES,
-            type=ConfigEntryType.BOOLEAN,
-            required=True,
-            default_value=True,
-        ),
-        ConfigEntry(
-            key=CONF_NEW_ALBUMS,
-            type=ConfigEntryType.BOOLEAN,
-            required=True,
-            default_value=True,
-        ),
-        ConfigEntry(
-            key=CONF_PLAYED_ALBUMS,
-            type=ConfigEntryType.BOOLEAN,
-            required=True,
-            default_value=True,
-        ),
-        ConfigEntry(
-            key=CONF_RECO_SIZE,
-            type=ConfigEntryType.INTEGER,
-            required=True,
-            default_value=10,
-        ),
-        ConfigEntry(
-            key=CONF_RAW_FILE,
-            type=ConfigEntryType.BOOLEAN,
-            required=False,
-            default_value=True,
-        ),
-        ConfigEntry(
-            key=CONF_PAGE_SIZE,
-            type=ConfigEntryType.INTEGER,
-            required=True,
-            default_value=200,
-            advanced=True,
-        ),
-    )

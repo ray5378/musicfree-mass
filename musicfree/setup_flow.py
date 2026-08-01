@@ -16,11 +16,43 @@ if TYPE_CHECKING:
     from music_assistant.models.setup_flow import SetupSession
 
 _ENTRIES = (
-    ConfigEntry(key=CONF_USERNAME, type=ConfigEntryType.STRING, required=True),
-    ConfigEntry(key=CONF_PASSWORD, type=ConfigEntryType.SECURE_STRING, required=True),
-    ConfigEntry(key=CONF_BASE_URL, type=ConfigEntryType.STRING, required=True),
-    ConfigEntry(key=CONF_PORT, type=ConfigEntryType.INTEGER, required=False),
-    ConfigEntry(key=CONF_PATH, type=ConfigEntryType.STRING, required=False),
+    ConfigEntry(
+        key=CONF_USERNAME,
+        type=ConfigEntryType.STRING,
+        required=True,
+        label="Username",
+        description="Your username for the MusicFree server.",
+    ),
+    ConfigEntry(
+        key=CONF_PASSWORD,
+        type=ConfigEntryType.SECURE_STRING,
+        required=True,
+        label="Password",
+        description="The password associated with the username.",
+    ),
+    ConfigEntry(
+        key=CONF_BASE_URL,
+        type=ConfigEntryType.STRING,
+        required=True,
+        label="Base URL",
+        description="Base URL for the MusicFree server, e.g. http://192.168.1.100",
+    ),
+    ConfigEntry(
+        key=CONF_PORT,
+        type=ConfigEntryType.INTEGER,
+        required=False,
+        default_value=None,
+        label="Port",
+        description="Port number for the MusicFree server (usually 80 for HTTP, 443 for HTTPS).",
+    ),
+    ConfigEntry(
+        key=CONF_PATH,
+        type=ConfigEntryType.STRING,
+        required=False,
+        default_value="",
+        label="Server Path",
+        description="Path to append to the base URL, e.g. /rest. Usually empty unless behind a proxy.",
+    ),
 )
 
 
