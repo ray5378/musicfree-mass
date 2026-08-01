@@ -8,12 +8,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ProviderFeature
 
 from .sonic_provider import OpenSonicProvider
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ConfigEntry, ConfigValueType, ProviderConfig
+    from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
     from music_assistant_models.provider import ProviderManifest
 
     from music_assistant.mass import MusicAssistant
