@@ -201,7 +201,8 @@ class OpenSonicProvider(MusicProvider):
             for entry in extensions:
                 if entry.name == "songLyrics":
                     self._id_lyrics = True
-        except OSError:
+        except Exception:
+            # MusicFree may only declare transcodeOffset; extensions query is optional
             self.logger.info("Failed to query server for OpenSubsonic extensions")
 
         self._enable_podcasts = bool(self.config.get_value(CONF_ENABLE_PODCASTS))
@@ -556,10 +557,16 @@ class OpenSonicProvider(MusicProvider):
 
         try:
             sonic_artist: SonicArtist = await self.conn.get_artist(artist_id=prov_artist_id)
-            sonic_info = await self.conn.get_artist_info2(aid=prov_artist_id)
         except (ParameterError, DataNotFoundError) as e:
             msg = f"Artist {prov_artist_id} not found"
             raise MediaNotFoundError(msg) from e
+        # MusicFree's getArtistInfo2 returns a non-standard structure that
+        # py-opensonic may fail to parse; treat it as optional.
+        sonic_info = None
+        try:
+            sonic_info = await self.conn.get_artist_info2(aid=prov_artist_id)
+        except Exception:
+            self.logger.debug("getArtistInfo2 failed for %s, skipping", prov_artist_id)
         return parse_artist(self.instance_id, sonic_artist, sonic_info)
 
     @use_cache(3600 * 3)  # cache for 3 hours
@@ -696,7 +703,11 @@ class OpenSonicProvider(MusicProvider):
         except DataNotFoundError as e:
             msg = f"Artist {prov_artist_id} not found"
             raise MediaNotFoundError(msg) from e
-        songs: list[SonicItem] = await self.conn.get_top_songs(sonic_artist.name)
+        try:
+            songs: list[SonicItem] = await self.conn.get_top_songs(sonic_artist.name)
+        except Exception:
+            # MusicFree may not fully support getTopSongs
+            return []
         tracks = []
         for entry in songs:
             self._set_loudness(entry)
@@ -934,7 +945,11 @@ class OpenSonicProvider(MusicProvider):
             name="Newest Podcast Episodes",
             translation_key="episodes_recently_added",
         )
-        sonic_episodes = await self.conn.get_newest_podcasts(count=self._reco_limit)
+        try:
+            sonic_episodes = await self.conn.get_newest_podcasts(count=self._reco_limit)
+        except Exception:
+            # MusicFree may not fully support podcasts
+            return podcasts
         for ep in sonic_episodes:
             if channel_info := await self._get_podcast_channel_async(ep.channel_id):
                 self._set_loudness(ep)
