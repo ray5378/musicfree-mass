@@ -3,10 +3,10 @@
   "domain": "musicfree",
   "stage": "experimental",
   "name": "MusicFree",
-  "description": "OpenSubsonic API bridge for MusicFree clients - browse and stream all MA music sources via the Subsonic protocol, compatible with music-free-site.",
+  "description": "Connect to a MusicFree (music-free-site) server via the OpenSubsonic API and browse/stream its music library.",
   "codeowners": [],
-  "requirements": ["aiohttp>=3.9.0"],
+  "credits": ["[py-opensonic](https://github.com/khers/py-opensonic)"],
+  "requirements": ["py-opensonic==10.2.1"],
   "documentation": "",
-  "multi_instance": true,
-  "icon": "mdi-transit-connection-variant"
+  "multi_instance": true
 }

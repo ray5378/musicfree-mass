@@ -8,30 +8,19 @@ from typing import TYPE_CHECKING
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ConfigEntryType
 
+from music_assistant.constants import CONF_PASSWORD, CONF_PATH, CONF_PORT, CONF_USERNAME
+from music_assistant.models.setup_flow import SetupFlowError
+from music_assistant.providers.musicfree.sonic_provider import CONF_BASE_URL
+
 if TYPE_CHECKING:
     from music_assistant.models.setup_flow import SetupSession
 
-CONF_PORT = "port"
-CONF_TOKEN = "token"
-CONF_SEARCH_SCOPE = "search_scope"
-
 _ENTRIES = (
-    ConfigEntry(
-        key=CONF_PORT,
-        type=ConfigEntryType.INTEGER,
-        default_value=4533,
-        required=True,
-    ),
-    ConfigEntry(
-        key=CONF_TOKEN,
-        type=ConfigEntryType.SECURE_STRING,
-        required=False,
-    ),
-    ConfigEntry(
-        key=CONF_SEARCH_SCOPE,
-        type=ConfigEntryType.STRING,
-        required=False,
-    ),
+    ConfigEntry(key=CONF_USERNAME, type=ConfigEntryType.STRING, required=True),
+    ConfigEntry(key=CONF_PASSWORD, type=ConfigEntryType.SECURE_STRING, required=True),
+    ConfigEntry(key=CONF_BASE_URL, type=ConfigEntryType.STRING, required=True),
+    ConfigEntry(key=CONF_PORT, type=ConfigEntryType.INTEGER, required=False),
+    ConfigEntry(key=CONF_PATH, type=ConfigEntryType.STRING, required=False),
 )
 
 
@@ -45,13 +34,8 @@ async def run_setup(session: SetupSession) -> None:
         ]
         submitted = await session.form(entries, step_id="user", errors=errors, last_step=True)
         setup_data.update(submitted)
-        # Auto-generate token if not provided
-        if not setup_data.get(CONF_TOKEN):
-            import secrets
-
-            setup_data[CONF_TOKEN] = secrets.token_hex(32)
         try:
             await session.finish(setup_data)
             return
-        except Exception as err:
-            errors = {"base": str(err)}
+        except SetupFlowError as err:
+            errors = {"base": err.translation_key or str(err)}
