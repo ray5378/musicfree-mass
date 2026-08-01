@@ -1,0 +1,19 @@
+{
+  "config_entries": {
+    "port": {
+      "label": "Server Port",
+      "description": "Port number for the MusicFree Subsonic API server (default: 4533)."
+    },
+    "token": {
+      "label": "API Token",
+      "description": "API token for client authentication (used as X-API-Key or JWT secret). Leave empty to auto-generate."
+    },
+    "search_scope": {
+      "label": "Search Scope",
+      "description": "Comma-separated list of provider domains to search (e.g. 'spotify,local'). Leave empty for all."
+    }
+  },
+  "manifest": {
+    "description": "OpenSubsonic API bridge for MusicFree clients - browse and stream all MA music sources via the Subsonic protocol."
+  }
+}

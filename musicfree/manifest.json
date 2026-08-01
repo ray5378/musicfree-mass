@@ -1,0 +1,12 @@
+{
+  "type": "plugin",
+  "domain": "musicfree",
+  "stage": "experimental",
+  "name": "MusicFree",
+  "description": "OpenSubsonic API bridge for MusicFree clients - browse and stream all MA music sources via the Subsonic protocol, compatible with music-free-site.",
+  "codeowners": [],
+  "requirements": ["aiohttp>=3.9.0"],
+  "documentation": "",
+  "multi_instance": true,
+  "icon": "mdi-transit-connection-variant"
+}
