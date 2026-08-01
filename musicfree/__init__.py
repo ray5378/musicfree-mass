@@ -8,14 +8,11 @@ with the music-free-site project.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
-import json
 import logging
 import secrets
 import time
 import xml.etree.ElementTree as ET
-from collections.abc import AsyncGenerator
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -32,11 +29,16 @@ from music_assistant_models.media_items import (
 
 from music_assistant.helpers.images import get_image_data
 from music_assistant.models import ProviderInstanceType
-from music_assistant.models.plugin import PluginProvider
+from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
-    from music_assistant_models.config_entries import ProviderConfig
+    from collections.abc import AsyncGenerator
+
+    from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
+    from music_assistant_models.enums import ProviderFeature
+    from music_assistant_models.media_items import SearchResults
     from music_assistant_models.provider import ProviderManifest
+    from music_assistant_models.streamdetails import StreamDetails
 
     from music_assistant.mass import MusicAssistant
 
@@ -47,6 +49,8 @@ CONF_PORT = "port"
 CONF_TOKEN = "token"
 CONF_SEARCH_SCOPE = "search_scope"
 LIBRARY_MAX = 99999
+
+SUPPORTED_FEATURES: set[ProviderFeature] = set()
 
 # Map of Subsonic endpoint names to handler methods
 ENDPOINT_MAP: dict[str, str] = {
@@ -299,7 +303,7 @@ def _dt_to_rfc(dt: datetime | None) -> str:
     return dt.isoformat()
 
 
-class MusicFreeProvider(PluginProvider):
+class MusicFreeProvider(MusicProvider):
     """MusicFree Subsonic API bridge provider."""
 
     _server: web.TCPSite | None = None
@@ -309,20 +313,47 @@ class MusicFreeProvider(PluginProvider):
     _port: int = 4533
     _search_scope: list[str] | None = None
 
-    async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
-        """Return the config entries for this provider."""
-        return (
-            ConfigEntry(
-                key=CONF_PORT,
-                type=ConfigEntryType.INTEGER,
-                default_value=self._port,
-            ),
-            ConfigEntry(
-                key=CONF_TOKEN,
-                type=ConfigEntryType.SECURE_STRING,
-                default_value=self._token,
-            ),
-        )
+    @property
+    def is_streaming_provider(self) -> bool:
+        """Return True if the provider is a streaming provider."""
+        return True
+
+    async def search(
+        self,
+        search_query: str,
+        media_types: list[MediaType],
+        limit: int = 5,
+    ) -> SearchResults:
+        """Search for media items - always return empty (this provider only bridges)."""
+        from music_assistant_models.media_items import SearchResults
+
+        return SearchResults()
+
+    async def get_library_artists(self) -> AsyncGenerator[Artist]:
+        """Retrieve library artists - always empty (this provider only bridges)."""
+        yield  # type: ignore[misc]
+        return
+
+    async def get_library_albums(self) -> AsyncGenerator[Album]:
+        """Retrieve library albums - always empty (this provider only bridges)."""
+        yield  # type: ignore[misc]
+        return
+
+    async def get_library_tracks(self) -> AsyncGenerator[Track]:
+        """Retrieve library tracks - always empty (this provider only bridges)."""
+        yield  # type: ignore[misc]
+        return
+
+    async def get_library_playlists(self) -> AsyncGenerator[Playlist]:
+        """Retrieve library playlists - always empty (this provider only bridges)."""
+        yield  # type: ignore[misc]
+        return
+
+    async def get_stream_details(
+        self, item_id: str, media_type: MediaType = MediaType.TRACK
+    ) -> StreamDetails:
+        """Get stream details - not used for this bridge provider."""
+        raise MediaNotFoundError(item_id)
 
     async def loaded_in_mass(self) -> None:
         """Start the HTTP server after loading."""
@@ -636,12 +667,7 @@ class MusicFreeProvider(PluginProvider):
             library_albums = []
 
         # Sort based on type
-        if album_type == "newest":
-            library_albums.sort(
-                key=lambda a: (a.metadata.created_at or datetime.min) if a.metadata else datetime.min,
-                reverse=True,
-            )
-        elif album_type == "recent":
+        if album_type == "newest" or album_type == "recent":
             library_albums.sort(
                 key=lambda a: (a.metadata.created_at or datetime.min) if a.metadata else datetime.min,
                 reverse=True,
@@ -785,7 +811,7 @@ class MusicFreeProvider(PluginProvider):
                 if img.content:
                     image_data = img.content
                     break
-                elif img.path:
+                if img.path:
                     try:
                         image_data = await get_image_data(self.mass, img.path)
                         if image_data:
@@ -1005,4 +1031,38 @@ async def setup(
     mass: MusicAssistant, manifest: ProviderManifest, config: ProviderConfig
 ) -> ProviderInstanceType:
     """Initialize provider(instance) with given configuration."""
-    return MusicFreeProvider(mass, manifest, config)
+    return MusicFreeProvider(mass, manifest, config, SUPPORTED_FEATURES)
+
+
+async def get_config_entries(
+    mass: MusicAssistant,
+    instance_id: str | None = None,
+    action: str | None = None,
+    values: dict[str, ConfigValueType] | None = None,
+) -> tuple[ConfigEntry, ...]:
+    """
+    Return Config entries to setup this provider.
+
+    instance_id: id of an existing provider instance (None if new instance setup).
+    action: [optional] action key called from config entries UI.
+    values: the (intermediate) raw values for config entries sent with the action.
+    """
+    # ruff: noqa: ARG001
+    return (
+        ConfigEntry(
+            key=CONF_PORT,
+            type=ConfigEntryType.INTEGER,
+            default_value=4533,
+            required=True,
+        ),
+        ConfigEntry(
+            key=CONF_TOKEN,
+            type=ConfigEntryType.SECURE_STRING,
+            required=False,
+        ),
+        ConfigEntry(
+            key=CONF_SEARCH_SCOPE,
+            type=ConfigEntryType.STRING,
+            required=False,
+        ),
+    )
