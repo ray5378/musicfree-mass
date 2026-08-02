@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +66,9 @@ if TYPE_CHECKING:
 
     from music_assistant.mass import MusicAssistant
     from music_assistant.models import ProviderInstanceType
+
+# maximum number of parallel lyrics requests during enumeration
+MF_LYRICS_CONCURRENCY = 8
 
 # supported provider features (MusicFree has no podcast support)
 SUPPORTED_FEATURES = {
@@ -167,8 +171,9 @@ class MusicFreeProvider(MusicProvider):
         result_artists = [parse_artist(self.instance_id, x) for x in answer.get("artist") or []]
         result_albums = [parse_album(self.instance_id, x) for x in answer.get("album") or []]
         result_tracks: list[Track] = []
-        for entry in answer.get("song") or []:
-            lyrics = await self.get_track_lyrics(entry)
+        song_entries = answer.get("song") or []
+        all_lyrics = await self._get_lyrics_for_entries(song_entries)
+        for entry, lyrics in zip(song_entries, all_lyrics):
             result_tracks.append(parse_track(self.instance_id, entry, lyrics=lyrics))
 
         return SearchResults(artists=result_artists, albums=result_albums, tracks=result_tracks)
@@ -234,8 +239,10 @@ class MusicFreeProvider(MusicProvider):
             if not songs:
                 break
             for entry in songs:
-                lyrics = await self.get_track_lyrics(entry)
-                yield parse_track(self.instance_id, entry, lyrics=lyrics)
+                # NOTE: lyrics are NOT fetched here (one slow HTTP call per track)
+                # to keep the full-library sync fast; MA fetches them lazily on demand
+                # through get_track() when a track is viewed.
+                yield parse_track(self.instance_id, entry)
             if len(songs) < count:
                 break
             offset += count
@@ -313,9 +320,9 @@ class MusicFreeProvider(MusicProvider):
             self.logger.warning("getArtistInfo2 failed: %s", err)
             return []
         songs = (artist_info.get("topSongs") or {}).get("song") or []
+        all_lyrics = await self._get_lyrics_for_entries(songs)
         tracks: list[Track] = []
-        for entry in songs:
-            lyrics = await self.get_track_lyrics(entry)
+        for entry, lyrics in zip(songs, all_lyrics):
             tracks.append(parse_track(self.instance_id, entry, lyrics=lyrics))
         return tracks
 
@@ -340,8 +347,9 @@ class MusicFreeProvider(MusicProvider):
         if not sonic_album:
             raise MediaNotFoundError(f"Album {prov_album_id} not found")
         tracks: list[Track] = []
-        for entry in sonic_album.get("song") or []:
-            lyrics = await self.get_track_lyrics(entry)
+        song_entries = sonic_album.get("song") or []
+        all_lyrics = await self._get_lyrics_for_entries(song_entries)
+        for entry, lyrics in zip(song_entries, all_lyrics):
             tracks.append(parse_track(self.instance_id, entry, lyrics=lyrics))
         return tracks
 
@@ -390,8 +398,8 @@ class MusicFreeProvider(MusicProvider):
             raise MediaNotFoundError(f"Playlist {prov_playlist_id} not found")
 
         for index, entry in enumerate(sonic_playlist.get("entry") or [], 1):
-            lyrics = await self.get_track_lyrics(entry)
-            track = parse_track(self.instance_id, entry, lyrics=lyrics)
+            # lyrics fetched lazily via get_track() to keep large playlists fast
+            track = parse_track(self.instance_id, entry)
             track.position = index
             result.append(track)
         return result
@@ -405,8 +413,8 @@ class MusicFreeProvider(MusicProvider):
             self.logger.info("getSimilarSongs failed: %s", err)
             return []
         tracks: list[Track] = []
-        for entry in songs:
-            lyrics = await self.get_track_lyrics(entry)
+        all_lyrics = await self._get_lyrics_for_entries(songs)
+        for entry, lyrics in zip(songs, all_lyrics):
             tracks.append(parse_track(self.instance_id, entry, lyrics=lyrics))
         return tracks
 
@@ -446,8 +454,9 @@ class MusicFreeProvider(MusicProvider):
                 starred.items.append(parse_album(self.instance_id, album))
             for artist in (starred_items.get("artist") or [])[: self._reco_limit]:
                 starred.items.append(parse_artist(self.instance_id, artist))
-            for song in (starred_items.get("song") or [])[: self._reco_limit]:
-                lyrics = await self.get_track_lyrics(song)
+            starred_songs = (starred_items.get("song") or [])[: self._reco_limit]
+            starred_lyrics = await self._get_lyrics_for_entries(starred_songs)
+            for song, lyrics in zip(starred_songs, starred_lyrics):
                 starred.items.append(parse_track(self.instance_id, song, lyrics=lyrics))
         except (MusicFreeConnectionError, MusicFreeApiError) as err:
             self.logger.warning("Failed to fetch starred items: %s", err)
@@ -486,8 +495,9 @@ class MusicFreeProvider(MusicProvider):
             translation_key="media.recommendations.random_songs",
         )
         try:
-            for song in await self.client.get_random_songs(size=self._reco_limit):
-                lyrics = await self.get_track_lyrics(song)
+            random_entries = await self.client.get_random_songs(size=self._reco_limit)
+            random_lyrics = await self._get_lyrics_for_entries(random_entries)
+            for song, lyrics in zip(random_entries, random_lyrics):
                 random_songs.items.append(parse_track(self.instance_id, song, lyrics=lyrics))
         except (MusicFreeConnectionError, MusicFreeApiError) as err:
             self.logger.warning("Failed to fetch random songs: %s", err)
@@ -526,6 +536,21 @@ class MusicFreeProvider(MusicProvider):
             return None
         value = str(ly["value"])
         return (value, value.startswith("["))
+
+    async def _get_lyrics_for_entries(
+        self, entries: list[dict[str, Any]]
+    ) -> list[tuple[str, bool] | None]:
+        """Fetch lyrics for a list of tracks concurrently (bounded)."""
+        if not entries:
+            return []
+        semaphore = asyncio.Semaphore(MF_LYRICS_CONCURRENCY)
+
+        async def _fetch(entry: dict[str, Any]) -> tuple[str, bool] | None:
+            async with semaphore:
+                return await self.get_track_lyrics(entry)
+
+        return await asyncio.gather(*(_fetch(entry) for entry in entries))
+
 
     # ------------------------------------------------------------------
     # playback / streaming
