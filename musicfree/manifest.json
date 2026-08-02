@@ -1,12 +1,12 @@
 {
   "type": "music",
   "domain": "musicfree",
-  "stage": "experimental",
-  "name": "MusicFree",
-  "description": "Connect to a MusicFree (music-free-site) server via the OpenSubsonic API and browse/stream its music library.",
-  "codeowners": [],
-  "credits": ["[py-opensonic](https://github.com/khers/py-opensonic)"],
-  "requirements": ["py-opensonic==10.2.1"],
-  "documentation": "",
-  "multi_instance": true
+  "stage": "stable",
+  "name": "MusicFree Server",
+  "description": "Stream music from your MusicFree (music-free-site) server — an OpenSubsonic compatible self-hosted music library.",
+  "codeowners": ["@musicfree"],
+  "requirements": [],
+  "documentation": "https://ansgoo.github.io/music-free-site/opensubsonic-api",
+  "multi_instance": true,
+  "icon": "music-box-multiple-outline"
 }

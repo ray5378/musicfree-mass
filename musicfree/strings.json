@@ -1,70 +1,55 @@
 {
   "config_entries": {
-    "username": {
-      "label": "[%key:common::config_entries::username::label%]",
-      "description": "Your username for the MusicFree server"
+    "mf_base_url": {
+      "label": "Base URL / IP Address",
+      "description": "The address of your MusicFree server, e.g. http://192.168.1.10"
     },
-    "password": {
-      "label": "[%key:common::config_entries::password::label%]",
+    "mf_port": {
+      "label": "Port",
+      "description": "The port your MusicFree server listens on (leave empty for the default)"
+    },
+    "mf_path": {
+      "label": "Server Path",
+      "description": "Optional sub path under which the server is served (e.g. /subsonic), usually left empty"
+    },
+    "mf_username": {
+      "label": "Username",
+      "description": "Your username for this MusicFree server"
+    },
+    "mf_password": {
+      "label": "Password",
       "description": "The password associated with the username"
     },
-    "baseURL": {
-      "label": "Base URL",
-      "description": "Base URL for the MusicFree server, e.g. http://192.168.1.100"
-    },
-    "port": {
-      "label": "Port",
-      "description": "Port number for the MusicFree server"
-    },
-    "path": {
-      "label": "Server Path",
-      "description": "Path to append to the base URL, e.g. /rest. Usually empty unless behind a proxy."
-    },
-    "enable_podcasts": {
-      "label": "Enable Podcasts",
-      "description": "Should the provider query for podcasts as well as music?"
-    },
-    "enable_legacy_auth": {
-      "label": "Enable Legacy Auth",
-      "description": "Enable OpenSubsonic \"legacy\" auth support"
-    },
-    "recommend_favorites": {
-      "label": "Recommend Favorites",
-      "description": "Should favorited (starred) items be included as recommendations."
-    },
-    "recommend_new": {
-      "label": "Recommend New Albums",
-      "description": "Should new albums be included as recommendations."
-    },
-    "recommend_played": {
-      "label": "Recommend Most Played",
-      "description": "Should most played albums be included as recommendations."
-    },
-    "recommendation_count": {
+    "mf_reco_size": {
       "label": "Recommendation Limit",
       "description": "How many recommendations from each enabled type should be included."
     },
-    "request_raw_file": {
-      "label": "No Transcoding For Streams",
-      "description": "Request that the server provide the original source file without applying any transcoding rules."
-    },
-    "pagination_size": {
-      "label": "Items per request",
-      "description": "How many items to request per server call. Smaller is better for low bandwidth. Max 500."
+    "mf_page_size": {
+      "label": "Number of items included per server request.",
+      "description": "When enumerating items from the server, how many should be in each request. Smaller will require more requests but is better for low bandwidth connections."
     }
   },
   "media": {
     "recommendations": {
       "starred_items": {
         "name": "Starred Items"
+      },
+      "recently_added_albums": {
+        "name": "New Albums"
+      },
+      "most_played_albums": {
+        "name": "Most Played Albums"
+      },
+      "random_songs": {
+        "name": "Random Songs"
       }
     }
   },
   "manifest": {
-    "description": "Connect to a MusicFree (music-free-site) server via the OpenSubsonic API."
+    "description": "Stream music from your MusicFree (music-free-site) server."
   },
   "errors": {
     "connect_failed": "Failed to connect to {0}, check your settings.",
-    "create_playlist_failed": "Failed to create playlist with name '{0}'."
+    "auth_failed": "Invalid username or password for the MusicFree server. Check your settings and try again."
   }
 }

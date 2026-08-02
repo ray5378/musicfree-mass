@@ -1,10 +1,9 @@
-"""Parse objects from py-opensonic into Music Assistant types."""
+"""Parse music-free-site OpenSubsonic JSON payloads into Music Assistant models."""
 
 from __future__ import annotations
 
-import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import Any
 
 from music_assistant_models.enums import ContentType, ImageType, MediaType
 from music_assistant_models.errors import InvalidDataError, MediaNotFoundError
@@ -16,8 +15,6 @@ from music_assistant_models.media_items import (
     MediaItemImage,
     MediaItemMetadata,
     Playlist,
-    Podcast,
-    PodcastEpisode,
     ProviderMapping,
     Track,
 )
@@ -25,34 +22,311 @@ from music_assistant_models.media_items import (
 from music_assistant.constants import UNKNOWN_ARTIST
 from music_assistant.helpers.util import parse_title_and_version
 
-if TYPE_CHECKING:
-    from libopensonic.media import AlbumID3 as SonicAlbum
-    from libopensonic.media import AlbumInfo as SonicAlbumInfo
-    from libopensonic.media import ArtistID3 as SonicArtist
-    from libopensonic.media import ArtistInfo2 as SonicArtistInfo
-    from libopensonic.media import Child as SonicSong
-    from libopensonic.media import Playlist as SonicPlaylist
-    from libopensonic.media import PodcastChannel as SonicPodcast
-    from libopensonic.media import PodcastEpisode as SonicEpisode
-    from libopensonic.media import StructuredLyrics
+from .constants import (
+    MF_DOMAIN,
+    MF_UNKNOWN_ARTIST_ID,
+    MF_VARIOUS_PREFIX,
+)
+
+# ----------------------------------------------------------------------------------
+# small helpers
+# ----------------------------------------------------------------------------------
 
 
-UNKNOWN_ARTIST_ID = "fake_artist_unknown"
+def _first(*values: Any, default: str = "") -> str:
+    """Return the first non-empty string value."""
+    for value in values:
+        if value is not None and str(value) != "":
+            return str(value)
+    return default
 
 
-# Because of some subsonic API weirdness, we have to lookup any podcast episode by finding it in
-# the list of episodes in a channel, to facilitate, we will use both the episode id and the
-# channel id concatenated as an episode id to MA
-EP_CHAN_SEP = "$!$"
+def _as_int(value: Any) -> int:
+    """Convert a value to int, returning 0 when that is not possible."""
+    try:
+        return int(str(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
-# We need the following prefix because of the way that Navidrome reports artists for individual
-# tracks on Various Artists albums, see the note in the _parse_track() method and the handling
-# in get_artist()
-NAVI_VARIOUS_PREFIX = "MA-NAVIDROME-"
+def _as_bool(value: Any) -> bool:
+    """Convert a value to bool, guarding against string booleans."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() in ("true", "1", "yes")
 
 
-SUBSONIC_DOMAIN = "opensubsonic"
+def _add_image(metadata: MediaItemMetadata, instance_id: str, path: str | None) -> None:
+    """Add a thumb image to the metadata if a path is present."""
+    if not path:
+        return
+    metadata.add_image(
+        MediaItemImage(
+            type=ImageType.THUMB,
+            path=path,
+            provider=instance_id,
+            remotely_accessible=False,
+        )
+    )
+
+
+def _get_audio_format(song: dict[str, Any]) -> AudioFormat:
+    """Build an AudioFormat from a song payload."""
+    return AudioFormat(
+        content_type=ContentType.try_parse(song.get("contentType") or "?"),
+        sample_rate=44100,
+        bit_depth=16,
+        channels=2,
+        bit_rate=_as_int(song.get("bitRate")) or None,
+    )
+
+
+# ----------------------------------------------------------------------------------
+# track
+# ----------------------------------------------------------------------------------
+
+
+def parse_track(
+    instance_id: str,
+    song: dict[str, Any],
+    album: Album | ItemMapping | None = None,
+    lyrics: tuple[str, bool] | None = None,
+) -> Track:
+    """Parse an OpenSubsonic 'child'/'song' payload into an MA Track."""
+    if not album:
+        album_id = song.get("albumId") or song.get("parent")
+        album_name = _first(song.get("album"), song.get("parent_name"))
+        if album_id and album_name:
+            album = get_item_mapping(instance_id, MediaType.ALBUM, str(album_id), album_name)
+
+    metadata: MediaItemMetadata = MediaItemMetadata()
+
+    if lyrics:
+        ly, synced = lyrics
+        if synced:
+            metadata.lrc_lyrics = ly
+        else:
+            metadata.lyrics = ly
+
+    if genre := song.get("genre"):
+        if not metadata.genres:
+            metadata.genres = set()
+        metadata.genres.add(str(genre))
+
+    name, version = parse_title_and_version(_first(song.get("title"), song.get("name"), "?"))
+
+    track = Track(
+        item_id=str(song.get("id") or song.get("item_id")),
+        provider=instance_id,
+        name=name,
+        version=version,
+        album=album,
+        duration=_as_int(song.get("duration")),
+        disc_number=_as_int(song.get("discNumber") or song.get("disc")),
+        favorite=_as_bool(song.get("starred")),
+        metadata=metadata,
+        provider_mappings={
+            ProviderMapping(
+                item_id=str(song.get("id") or song.get("item_id")),
+                provider_domain=MF_DOMAIN,
+                provider_instance=instance_id,
+                available=True,
+                audio_format=_get_audio_format(song),
+            )
+        },
+        track_number=_as_int(song.get("track")),
+    )
+
+    if year := _as_int(song.get("year")):
+        track.metadata.release_date = datetime(year, 1, 1)
+
+    _add_image(metadata, instance_id, song.get("coverArt"))
+
+    # artists: prefer the explicit id, then the artists array, then name-only fallbacks
+    if artist_id := song.get("artistId"):
+        track.artists.append(
+            get_item_mapping(
+                instance_id,
+                MediaType.ARTIST,
+                str(artist_id),
+                _first(song.get("artist"), UNKNOWN_ARTIST),
+            )
+        )
+
+    for entry in song.get("artists") or []:
+        if isinstance(entry, dict) and entry.get("id") and entry.get("name"):
+            if entry.get("id") == song.get("artistId"):
+                continue
+            track.artists.append(
+                get_item_mapping(instance_id, MediaType.ARTIST, str(entry["id"]), str(entry["name"]))
+            )
+
+    if not track.artists:
+        if artist_name := song.get("artist"):
+            # name-only artist (e.g. various-artists albums): build a fake id
+            fake_id = f"{MF_VARIOUS_PREFIX}{artist_name}"
+            artist = Artist(
+                item_id=fake_id,
+                provider=instance_id,
+                name=str(artist_name),
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=fake_id,
+                        provider_domain=MF_DOMAIN,
+                        provider_instance=instance_id,
+                    )
+                },
+            )
+        else:
+            artist = Artist(
+                item_id=MF_UNKNOWN_ARTIST_ID,
+                name=UNKNOWN_ARTIST,
+                provider=instance_id,
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=MF_UNKNOWN_ARTIST_ID,
+                        provider_domain=MF_DOMAIN,
+                        provider_instance=instance_id,
+                    )
+                },
+            )
+        track.artists.append(artist)
+
+    return track
+
+
+# ----------------------------------------------------------------------------------
+# artist
+# ----------------------------------------------------------------------------------
+
+
+def parse_artist(instance_id: str, artist: dict[str, Any]) -> Artist:
+    """Parse an OpenSubsonic artist payload into an MA Artist."""
+    metadata: MediaItemMetadata = MediaItemMetadata()
+    _add_image(metadata, instance_id, artist.get("coverArt"))
+
+    if bio := artist.get("biography"):
+        metadata.description = str(bio)
+
+    parsed = Artist(
+        item_id=str(artist.get("id")),
+        name=_first(artist.get("name"), artist.get("artist"), "?"),
+        metadata=metadata,
+        provider=instance_id,
+        favorite=_as_bool(artist.get("starred")),
+        provider_mappings={
+            ProviderMapping(
+                item_id=str(artist.get("id")),
+                provider_domain=MF_DOMAIN,
+                provider_instance=instance_id,
+            )
+        },
+    )
+    return parsed
+
+
+# ----------------------------------------------------------------------------------
+# album
+# ----------------------------------------------------------------------------------
+
+
+def parse_album(instance_id: str, album: dict[str, Any]) -> Album:
+    """Parse an OpenSubsonic album payload into an MA Album."""
+    metadata: MediaItemMetadata = MediaItemMetadata()
+    _add_image(metadata, instance_id, album.get("coverArt"))
+
+    if genre := album.get("genre"):
+        if not metadata.genres:
+            metadata.genres = set()
+        metadata.genres.add(str(genre))
+
+    name, version = parse_title_and_version(
+        _first(album.get("name"), album.get("album"), album.get("title"), "?")
+    )
+
+    parsed = Album(
+        item_id=str(album.get("id")),
+        provider=instance_id,
+        metadata=metadata,
+        name=name,
+        version=version,
+        favorite=_as_bool(album.get("starred")),
+        provider_mappings={
+            ProviderMapping(
+                item_id=str(album.get("id")),
+                provider_domain=MF_DOMAIN,
+                provider_instance=instance_id,
+            )
+        },
+        year=_as_int(album.get("year")) or None,
+    )
+
+    if artist_id := album.get("artistId"):
+        parsed.artists.append(
+            get_item_mapping(
+                instance_id,
+                MediaType.ARTIST,
+                str(artist_id),
+                _first(album.get("artist"), UNKNOWN_ARTIST),
+            )
+        )
+    elif not album.get("artists"):
+        parsed.artists.append(
+            Artist(
+                item_id=MF_UNKNOWN_ARTIST_ID,
+                name=UNKNOWN_ARTIST,
+                provider=instance_id,
+                provider_mappings={
+                    ProviderMapping(
+                        item_id=MF_UNKNOWN_ARTIST_ID,
+                        provider_domain=MF_DOMAIN,
+                        provider_instance=instance_id,
+                    )
+                },
+            )
+        )
+
+    for entry in album.get("artists") or []:
+        if isinstance(entry, dict) and entry.get("id") and entry.get("name"):
+            if entry.get("id") == album.get("artistId"):
+                continue
+            parsed.artists.append(
+                get_item_mapping(instance_id, MediaType.ARTIST, str(entry["id"]), str(entry["name"]))
+            )
+
+    return parsed
+
+
+# ----------------------------------------------------------------------------------
+# playlist
+# ----------------------------------------------------------------------------------
+
+
+def parse_playlist(instance_id: str, playlist: dict[str, Any]) -> Playlist:
+    """Parse an OpenSubsonic playlist payload into an MA Playlist."""
+    parsed = Playlist(
+        item_id=str(playlist.get("id")),
+        provider=instance_id,
+        name=_first(playlist.get("name"), playlist.get("title"), "?"),
+        owner=str(playlist.get("owner") or ""),
+        is_editable=False,
+        provider_mappings={
+            ProviderMapping(
+                item_id=str(playlist.get("id")),
+                provider_domain=MF_DOMAIN,
+                provider_instance=instance_id,
+            )
+        },
+    )
+    _add_image(parsed.metadata, instance_id, playlist.get("coverArt"))
+    return parsed
+
+
+# ----------------------------------------------------------------------------------
+# misc
+# ----------------------------------------------------------------------------------
 
 
 def get_item_mapping(instance_id: str, media_type: MediaType, key: str, name: str) -> ItemMapping:
@@ -65,480 +339,31 @@ def get_item_mapping(instance_id: str, media_type: MediaType, key: str, name: st
     )
 
 
-def parse_track(  # noqa: PLR0915
-    logger: logging.Logger,
-    instance_id: str,
-    sonic_song: SonicSong,
-    album: Album | ItemMapping | None = None,
-    lyrics: tuple[str, bool] | None = None,
-) -> Track:
-    """Parse an OpenSubsonic.Child into an MA Track."""
-    # Unfortunately, the Song response type is not defined in the open subsonic spec so we have
-    # implementations which disagree about where the album id for this song should be stored.
-    # We accept either song.ablum_id or song.parent but prefer album_id.
-    if not album:
-        if sonic_song.album_id and sonic_song.album:
-            album = get_item_mapping(
-                instance_id, MediaType.ALBUM, sonic_song.album_id, sonic_song.album
-            )
-        elif sonic_song.parent and sonic_song.album:
-            album = get_item_mapping(
-                instance_id, MediaType.ALBUM, sonic_song.parent, sonic_song.album
-            )
-
-    metadata: MediaItemMetadata = MediaItemMetadata()
-
-    if lyrics:
-        ly, synced = lyrics
-        if synced:
-            metadata.lrc_lyrics = ly
-        else:
-            metadata.lyrics = ly
-
-    if sonic_song.explicit_status and sonic_song.explicit_status != "clean":
-        metadata.explicit = True
-
-    if sonic_song.genre:
-        if not metadata.genres:
-            metadata.genres = set()
-        metadata.genres.add(sonic_song.genre)
-
-    if sonic_song.genres:
-        if not metadata.genres:
-            metadata.genres = set()
-        for g in sonic_song.genres:
-            metadata.genres.add(g.name)
-
-    if sonic_song.moods:
-        metadata.mood = sonic_song.moods[0]
-
-    if sonic_song.contributors:
-        if not metadata.performers:
-            metadata.performers = set()
-        for c in sonic_song.contributors:
-            metadata.performers.add(c.artist.name)
-
-    if isinstance(album, Album) and album.version:
-        name = sonic_song.title
-        version = album.version
-    else:
-        name, version = parse_title_and_version(sonic_song.title)
-
-    track = Track(
-        item_id=sonic_song.id,
-        provider=instance_id,
-        name=name,
-        version=version,
-        album=album,
-        duration=sonic_song.duration or 0,
-        disc_number=sonic_song.disc_number or 0,
-        favorite=bool(sonic_song.starred),
-        metadata=metadata,
-        provider_mappings={
-            ProviderMapping(
-                item_id=sonic_song.id,
-                provider_domain=SUBSONIC_DOMAIN,
-                provider_instance=instance_id,
-                available=True,
-                audio_format=AudioFormat(
-                    content_type=ContentType.try_parse(sonic_song.content_type or "?"),
-                    sample_rate=sonic_song.sampling_rate or 44100,
-                    bit_depth=sonic_song.bit_depth or 16,
-                    channels=sonic_song.channel_count or 2,
-                    bit_rate=sonic_song.bit_rate,
-                ),
-            )
-        },
-        track_number=sonic_song.track or 0,
-    )
-
-    if sonic_song.music_brainz_id:
-        track.mbid = sonic_song.music_brainz_id
-
-    if sonic_song.sort_name:
-        track.sort_name = sonic_song.sort_name
-
-    # We need to find an artist for this track but various implementations seem to disagree
-    # about where the artist with the valid ID needs to be found. We will add any artist with
-    # an ID and only use UNKNOWN if none are found.
-
-    if sonic_song.artist_id:
-        track.artists.append(
-            get_item_mapping(
-                instance_id,
-                MediaType.ARTIST,
-                sonic_song.artist_id,
-                sonic_song.artist or UNKNOWN_ARTIST,
-            )
-        )
-
-    if sonic_song.artists:
-        for entry in sonic_song.artists:
-            if entry.id == sonic_song.artist_id:
-                continue
-            if entry.id is not None and entry.name is not None:
-                track.artists.append(
-                    get_item_mapping(instance_id, MediaType.ARTIST, entry.id, entry.name)
-                )
-
-    if not track.artists:
-        if sonic_song.artist and not sonic_song.artist_id:
-            # This is how Navidrome handles tracks from albums which are marked
-            # 'Various Artists'. Unfortunately, we cannot lookup this artist independently
-            # because it will not have an entry in the artists table so the best we can do it
-            # add a 'fake' id with the proper artist name and have get_artist() check for this
-            # id and handle it locally.
-            fake_id = f"{NAVI_VARIOUS_PREFIX}{sonic_song.artist}"
-            artist = Artist(
-                item_id=fake_id,
-                provider=SUBSONIC_DOMAIN,
-                name=sonic_song.artist,
-                provider_mappings={
-                    ProviderMapping(
-                        item_id=fake_id,
-                        provider_domain=SUBSONIC_DOMAIN,
-                        provider_instance=instance_id,
-                    )
-                },
-            )
-        else:
-            logger.info(
-                "Unable to find artist ID for track '%s' with ID '%s'.",
-                sonic_song.title,
-                sonic_song.id,
-            )
-            artist = Artist(
-                item_id=UNKNOWN_ARTIST_ID,
-                name=UNKNOWN_ARTIST,
-                provider=instance_id,
-                provider_mappings={
-                    ProviderMapping(
-                        item_id=UNKNOWN_ARTIST_ID,
-                        provider_domain=SUBSONIC_DOMAIN,
-                        provider_instance=instance_id,
-                    )
-                },
-            )
-
-        track.artists.append(artist)
-    return track
-
-
-def parse_artist(
-    instance_id: str, sonic_artist: SonicArtist, sonic_info: SonicArtistInfo | None = None
-) -> Artist:
-    """Parse artist and artistInfo into a Music Assistant Artist."""
-    metadata: MediaItemMetadata = MediaItemMetadata()
-
-    if sonic_artist.cover_art:
-        metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_artist.cover_art,
-                provider=instance_id,
-                remotely_accessible=False,
-            )
-        )
-
-    if sonic_artist.artist_image_url:
-        metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_artist.artist_image_url,
-                provider=instance_id,
-                remotely_accessible=True,
-            )
-        )
-
-    if sonic_info:
-        if sonic_info.biography:
-            metadata.description = sonic_info.biography
-        if sonic_info.small_image_url:
-            metadata.add_image(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=sonic_info.small_image_url,
-                    provider=instance_id,
-                    remotely_accessible=True,
-                )
-            )
-
-    artist = Artist(
-        item_id=sonic_artist.id,
-        name=sonic_artist.name,
-        metadata=metadata,
-        provider=SUBSONIC_DOMAIN,
-        favorite=bool(sonic_artist.starred),
-        provider_mappings={
-            ProviderMapping(
-                item_id=sonic_artist.id,
-                provider_domain=SUBSONIC_DOMAIN,
-                provider_instance=instance_id,
-            )
-        },
-        sort_name=sonic_artist.sort_name,
-    )
-
-    if sonic_artist.music_brainz_id:
-        artist.mbid = sonic_artist.music_brainz_id
-
-    return artist
-
-
-def parse_album(
-    logger: logging.Logger,
-    instance_id: str,
-    sonic_album: SonicAlbum,
-    sonic_info: SonicAlbumInfo | None = None,
-) -> Album:
-    """Parse album and albumInfo into a Music Assistant Album."""
-    metadata: MediaItemMetadata = MediaItemMetadata()
-
-    if sonic_album.cover_art:
-        metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_album.cover_art,
-                provider=instance_id,
-                remotely_accessible=False,
-            ),
-        )
-
-    if sonic_info:
-        if sonic_info.small_image_url:
-            metadata.add_image(
-                MediaItemImage(
-                    type=ImageType.THUMB,
-                    path=sonic_info.small_image_url,
-                    remotely_accessible=True,
-                    provider=instance_id,
-                )
-            )
-        if sonic_info.notes:
-            metadata.description = sonic_info.notes
-
-    if sonic_album.genre:
-        if not metadata.genres:
-            metadata.genres = set()
-        metadata.genres.add(sonic_album.genre)
-
-    if sonic_album.genres:
-        if not metadata.genres:
-            metadata.genres = set()
-        for g in sonic_album.genres:
-            metadata.genres.add(g.name)
-
-    if sonic_album.moods:
-        metadata.mood = sonic_album.moods[0]
-
-    if sonic_album.version:
-        name = sonic_album.name
-        version = sonic_album.version
-    else:
-        name, version = parse_title_and_version(sonic_album.name)
-
-    album = Album(
-        item_id=sonic_album.id,
-        provider=SUBSONIC_DOMAIN,
-        metadata=metadata,
-        name=name,
-        version=version,
-        favorite=bool(sonic_album.starred),
-        provider_mappings={
-            ProviderMapping(
-                item_id=sonic_album.id,
-                provider_domain=SUBSONIC_DOMAIN,
-                provider_instance=instance_id,
-            )
-        },
-        year=sonic_album.year,
-    )
-
-    if sonic_album.sort_name:
-        album.sort_name = sonic_album.sort_name
-
-    if sonic_album.music_brainz_id:
-        album.mbid = sonic_album.music_brainz_id
-
-    if sonic_album.artist_id:
-        album.artists.append(
-            ItemMapping(
-                media_type=MediaType.ARTIST,
-                item_id=sonic_album.artist_id,
-                provider=instance_id,
-                name=sonic_album.artist or UNKNOWN_ARTIST,
-            )
-        )
-    elif not sonic_album.artists:
-        logger.info(
-            "Unable to find an artist ID for album '%s' with ID '%s'.",
-            sonic_album.name,
-            sonic_album.id,
-        )
-        album.artists.append(
-            Artist(
-                item_id=UNKNOWN_ARTIST_ID,
-                name=UNKNOWN_ARTIST,
-                provider=instance_id,
-                provider_mappings={
-                    ProviderMapping(
-                        item_id=UNKNOWN_ARTIST_ID,
-                        provider_domain=SUBSONIC_DOMAIN,
-                        provider_instance=instance_id,
-                    )
-                },
-            )
-        )
-
-    if sonic_album.artists:
-        for a in sonic_album.artists:
-            if a.id == sonic_album.artist_id:
-                continue
-            album.artists.append(
-                ItemMapping(
-                    media_type=MediaType.ARTIST, item_id=a.id, provider=instance_id, name=a.name
-                )
-            )
-
-    return album
-
-
-def parse_playlist(instance_id: str, sonic_playlist: SonicPlaylist) -> Playlist:
-    """Parse subsonic Playlist into MA Playlist."""
-    playlist = Playlist(
-        item_id=sonic_playlist.id,
-        provider=SUBSONIC_DOMAIN,
-        name=sonic_playlist.name,
-        is_editable=True,
-        provider_mappings={
-            ProviderMapping(
-                item_id=sonic_playlist.id,
-                provider_domain=SUBSONIC_DOMAIN,
-                provider_instance=instance_id,
-            )
-        },
-    )
-
-    if sonic_playlist.cover_art:
-        playlist.metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_playlist.cover_art,
-                provider=instance_id,
-                remotely_accessible=False,
-            )
-        )
-
-    return playlist
-
-
-def parse_podcast(instance_id: str, sonic_podcast: SonicPodcast) -> Podcast:
-    """Parse Subsonic PodcastChannel into MA Podcast."""
-    if not sonic_podcast.title:
-        raise InvalidDataError(
-            f"Subsonic Podcast ({sonic_podcast.id})is missing required name field."
-        )
-    podcast = Podcast(
-        item_id=sonic_podcast.id,
-        provider=SUBSONIC_DOMAIN,
-        name=sonic_podcast.title,
-        uri=sonic_podcast.url,
-        total_episodes=len(sonic_podcast.episode) if sonic_podcast.episode else 0,
-        provider_mappings={
-            ProviderMapping(
-                item_id=sonic_podcast.id,
-                provider_domain=SUBSONIC_DOMAIN,
-                provider_instance=instance_id,
-            )
-        },
-    )
-
-    podcast.metadata.description = sonic_podcast.description
-
-    if sonic_podcast.cover_art:
-        podcast.metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_podcast.cover_art,
-                provider=instance_id,
-                remotely_accessible=False,
-            )
-        )
-
-    return podcast
-
-
-def parse_epsiode(
-    instance_id: str, sonic_episode: SonicEpisode, sonic_channel: SonicPodcast
-) -> PodcastEpisode:
-    """Parse an Open Subsonic Podcast Episode into an MA PodcastEpisode."""
-    eid = f"{sonic_episode.channel_id}{EP_CHAN_SEP}{sonic_episode.id}"
-    pos = 1
-    if not sonic_channel.episode:
-        raise MediaNotFoundError(f"Podcast Channel '{sonic_channel.id}' missing episode list")
-
-    for ep in sonic_channel.episode:
-        if ep.id == sonic_episode.id:
-            break
-        pos += 1
-
-    episode = PodcastEpisode(
-        item_id=eid,
-        provider=SUBSONIC_DOMAIN,
-        name=sonic_episode.title,
-        position=pos,
-        podcast=parse_podcast(instance_id, sonic_channel),
-        provider_mappings={
-            ProviderMapping(
-                item_id=eid,
-                provider_domain=SUBSONIC_DOMAIN,
-                provider_instance=instance_id,
-            )
-        },
-        duration=sonic_episode.duration or 0,
-    )
-
-    if sonic_episode.publish_date:
-        episode.metadata.release_date = datetime.fromisoformat(sonic_episode.publish_date)
-
-    if sonic_episode.description:
-        episode.metadata.description = sonic_episode.description
-
-    if sonic_episode.cover_art:
-        episode.metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_episode.cover_art,
-                provider=instance_id,
-                remotely_accessible=False,
-            )
-        )
-    elif sonic_channel.cover_art:
-        episode.metadata.add_image(
-            MediaItemImage(
-                type=ImageType.THUMB,
-                path=sonic_channel.cover_art,
-                provider=instance_id,
-                remotely_accessible=False,
-            )
-        )
-
-    return episode
-
-
-def parse_structured_lyrics(lyrics: StructuredLyrics) -> tuple[str, bool]:
-    """Parse the Open Subsonic Structured lyrics objest into MA Lyrics."""
+def parse_structured_lyrics(lyrics: dict[str, Any]) -> tuple[str, bool]:
+    """Parse the OpenSubsonic structured lyrics object into MA lyrics."""
     lines: list[str] = []
-    if lyrics.synced:
-        offset: int = int(lyrics.offset) if lyrics.offset else 0
-        for line in lyrics.line:
-            if line.start is None:
-                raise InvalidDataError("Open Subsonic Synced lyric missing time index")
-            ms = int(line.start) + offset
+    synced = bool(lyrics.get("synced"))
+    if synced:
+        offset: int = _as_int(lyrics.get("offset"))
+        for line in lyrics.get("line") or []:
+            start = line.get("start")
+            if start is None:
+                raise InvalidDataError("Open Subsonic synced lyric missing time index")
+            ms = _as_int(start) + offset
             dt = datetime.fromtimestamp(ms / 1000, tz=UTC)
             ts = dt.strftime("%M:%S.%f")[:-4]
-            lines.append(f"[{ts}]{line.value}")
+            lines.append(f"[{ts}]{line.get('value', '')}")
     else:
-        for line in lyrics.line:
-            lines.append(line.value)
-    return ("\n".join(lines), lyrics.synced)
+        for line in lyrics.get("line") or []:
+            lines.append(str(line.get("value", "")))
+    return ("\n".join(lines), synced)
+
+
+def to_datetime(value: Any) -> datetime | None:
+    """Parse an ISO datetime string into a datetime object (or None)."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
